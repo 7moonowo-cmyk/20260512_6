@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Sketch</title>
+
+    <link rel="stylesheet" type="text/css" href="style.css">
+
+    <script src="libraries/p5.min.js"></script>
+    <script src="libraries/p5.sound.min.js"></script>
+    <!-- 引入 ml5.js 用於 AI 偵測 -->
+    <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+    <!-- 引入 PeerJS 用於遠端影像傳輸 -->
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: black;
+      }
+    </style>
+  </head>
+
+  <body>
+    <script>
+      let handPose;
+      let faceMesh;
+      let video;
+      let hands = [];
+      let faces = [];
+      let earringImgs = [];
+      let peer;
+      let myId;
+      let isHost = true;
+      let qrImage;
+      let statusText = "正在初始化連線...";
+      let headerHeight = 80;
+      let detectionStarted = false;
+
+      function preload() {
+        earringImgs[0] = loadImage('acc1_ring.png');
+        earringImgs[1] = loadImage('acc2_pearl.png');
+        earringImgs[2] = loadImage('acc3_tassel.png');
+        earringImgs[3] = loadImage('acc4_jade.png');
+        earringImgs[4] = loadImage('acc5_phoenix.png');
+      }
+
+      function setup() {
+        createCanvas(windowWidth, windowHeight);
+
+        // 將模型初始化移至 setup，避免載入模型權重時導致網頁卡死在 Loading 畫面
+        handPose = ml5.handPose({ flipped: false });
+        faceMesh = ml5.faceMesh({ maxFaces: 1, flipped: false });
+
+        let hash = window.location.hash;
+        if (hash && hash.length > 1) {
+          isHost = false;
+          setupSender(hash.substring(1));
+        } else {
+          isHost = true;
+          setupHost();
+        }
+      }
+
+      function setupHost() {
+        peer = new Peer();
+        peer.on('open', (id) => {
+          myId = id;
+          let url = window.location.href.split('#')[0] + "#" + myId;
+          qrImage = loadImage(`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(url)}`);
+          statusText = "請用手機掃描 QR Code 以連接相機";
+        });
+
+        peer.on('call', (call) => {
+          call.answer();
+          call.on('stream', (remoteStream) => {
+            video = createVideo('');
+            video.elt.srcObject = remoteStream;
+            video.elt.muted = true;
+            video.elt.play();
+            video.hide();
+          });
+        });
+      }
+
+      function setupSender(targetId) {
+        video = createCapture(VIDEO);
+        video.size(640, 480);
+        video.hide();
+        peer = new Peer();
+        peer.on('open', () => {
+          let checkInterval = setInterval(() => {
+            if (video.elt.srcObject) {
+              peer.call(targetId, video.elt.srcObject);
+              clearInterval(checkInterval);
+              statusText = "影像傳送中，請查看電腦畫面";
+            }
+          }, 500);
+        });
+      }
+
+      function draw() {
+        background(0);
+        
+        if (video && (video.elt.srcObject || video.elt.readyState >= 2)) {
+          // 自動啟動偵測，避免事件未觸發導致的黑屏或卡頓
+          if (!detectionStarted && video.elt.videoWidth > 0) {
+            handPose.detectStart(video, (results) => { hands = results; });
+            faceMesh.detectStart(video, (results) => { faces = results; });
+            detectionStarted = true;
+            statusText = "已連接遠端相機";
+          }
+
+          let screenW = width;
+          let screenH = height - headerHeight;
+          let videoW = video.elt.videoWidth || 640;
+          let videoH = video.elt.videoHeight || 480;
+          let s = min(screenW / videoW, screenH / videoH);
+          let drawW = videoW * s;
+          let drawH = videoH * s;
+          let xOff = (screenW - drawW) / 2;
+          let yOff = headerHeight + (screenH - drawH) / 2;
+
+          push();
+          translate(width, 0);
+          scale(-1, 1);
+          image(video, xOff, yOff, drawW, drawH);
+
+          let currentEarring = null;
+          if (hands.length > 0) {
+            for (let hand of hands) {
+              if (hand.confidence > 0.1) {
+                let kp = hand.keypoints;
+                let fingersUp = 0; 
+                // 更加穩定的指尖偵測邏輯
+                if (kp[8].y < kp[6].y) fingersUp++;  // 食指
+                if (kp[12].y < kp[10].y) fingersUp++; // 中指
+                if (kp[16].y < kp[14].y) fingersUp++; // 無名指
+                if (kp[20].y < kp[18].y) fingersUp++; // 小指
+                if (dist(kp[4].x, kp[4].y, kp[17].x, kp[17].y) > dist(kp[3].x, kp[3].y, kp[17].x, kp[17].y)) fingersUp++; // 大拇指
+
+                if (fingersUp >= 1 && fingersUp <= 5) {
+                  currentEarring = earringImgs[fingersUp - 1];
+                }
+                break; 
+              }
+            }
+          }
+
+          if (currentEarring && faces.length > 0) {
+            for (let face of faces) {
+              let leftEarlobe = face.keypoints[361];
+              let rightEarlobe = face.keypoints[132];
+              let eyeDist = dist(face.keypoints[33].x, face.keypoints[33].y, face.keypoints[263].x, face.keypoints[263].y);
+              let ringSize = eyeDist * 0.5; 
+              
+              let earringW = ringSize * s;
+              let earringH = earringW * (currentEarring.height / currentEarring.width);
+
+              imageMode(CENTER);
+              // 將耳環 Y 座標向下偏移高度的一半，確保圖片頂部的「耳針」位置精確對準耳垂
+              image(currentEarring, leftEarlobe.x * s + xOff, leftEarlobe.y * s + yOff + earringH / 2, earringW, earringH);
+              image(currentEarring, rightEarlobe.x * s + xOff, rightEarlobe.y * s + yOff + earringH / 2, earringW, earringH);
+              imageMode(CORNER);
+            }
+          }
+          pop();
+        }
+
+        // UI 層 (不鏡像)
+        fill(255);
+        textAlign(LEFT, CENTER);
+        textSize(32);
+        textStyle(BOLD);
+        text("414730332紀XX", 30, headerHeight / 2);
+
+        textAlign(CENTER, CENTER);
+        if (isHost && !video && qrImage) {
+          imageMode(CENTER);
+          image(qrImage, width / 2, height / 2, 200, 200);
+          imageMode(CORNER);
+          textSize(16);
+          text(statusText, width / 2, height - 30);
+        } else {
+          textSize(16);
+          text(statusText, width / 2, height - 30);
+        }
+      }
+
+      function windowResized() {
+        resizeCanvas(windowWidth, windowHeight);
+      }
+    </script>
+  </body>
+</html>
